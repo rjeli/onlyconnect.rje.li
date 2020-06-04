@@ -5,6 +5,7 @@ Requires=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/nodejs /root/onlyconnect.rje.li/server.js
+WorkingDirectory=/root/onlyconnect.rje.li
 
 [Install]
 WantedBy=multi-user.target
