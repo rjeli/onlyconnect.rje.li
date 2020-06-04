@@ -11,10 +11,12 @@ function generateCode(len) {
 
 let State = {
 	mode: 'splash',
-	name: 'player-' + generateCode(4),
+	name: 'anon-' + generateCode(4),
 	lobby: '',
 	status: 'ok',
 };
+
+// state convenience functions
 
 function teamMembers(team) {
 	return Object.keys(State.members).filter(mId => State.members[mId].team === team);
@@ -24,17 +26,58 @@ function teamMemberNames(team) {
 	return teamMembers(team).map(mId => State.members[mId].name);
 }
 
-function stateBoundInput(fieldName) {
+function isMyTurn() {
+	return State.turn === State.members[State.mId].team;
+}
+
+function stateBoundInput(fieldName, style, cb) {
 	return m('input', { 
+		style,
 		value: State[fieldName], 
-		oninput: e => State[fieldName] = e.target.value,
+		oninput: e => {
+			State[fieldName] = e.target.value;
+			if (cb) cb(e.target.value);
+		},
 	});
+}
+
+function revealedClues() {
+	return State.clues.slice(0, State.numRevealed);
+}
+
+function voteList(yesorno) {
+	return Object.keys(State.votes).filter(mId => State.votes[mId] === yesorno);
+}
+
+function buzzerWasMe() {
+	return State.buzzed === State.mId;
+}
+
+function iVoted() {
+	return State.votes[State.mId] !== undefined;
+}
+
+function votingFinished() {
+	return State.voteResult !== null;
+}
+
+function timeRemaining() {
+	const { startTime, endTime } = State;
+	const now = Date.now();
+	const pct = (now - startTime) / (endTime - startTime);
+	const sLen = 20;
+	let s = '[';
+	// console.log('pct:', pct);
+	const nLeading = Math.round(pct*sLen);
+	s += '='.repeat(nLeading);
+	s += ' '.repeat(Math.max(0, sLen-nLeading));
+	s += '] ' + Math.floor((endTime-now)/1000);
+	return m('span', { style: { whiteSpace: 'pre', fontFamily: 'monospace' } }, s);
 }
 
 // socket.io
 
 const socket = io();
-
 socket.on('connect', () => {
 	console.log('connected to socket.io server');
 });
@@ -56,6 +99,17 @@ socket.on('update-state', newState => {
 	console.log('updating state with', newState);
 	State = Object.assign({}, State, newState);
 	m.redraw();
+});
+
+socket.on('flash', ({ winner }) => {
+	State.guess = '';
+	m.redraw();
+	const color = winner === State.members[State.mId].team ? 'green' : 'red';
+	console.log('flashing', color);
+	document.body.classList.add('flash-'+color);
+	setTimeout(() => {
+		document.body.classList.remove('flash-'+color);
+	}, 500);
 });
 
 // components
@@ -105,80 +159,61 @@ const Lobby = {
 	},
 };
 
-function isMyTurn() {
-	return State.turn === State.members[State.mId].team;
-}
-
 const Buzzer = {
-	voteList(yesorno) {
-		return m('ul', Object.keys(State.votes)
-			.filter(mId => State.votes[mId] === yesorno)
-			.map(mId => m('li', State.members[mId].name)));
-	},
-	buzzerWasMe() {
-		return State.buzzed === State.mId;
-	},
-	timeRemaining() {
-		const { startTime } = State;
-		const elapsed = Date.now() - startTime;
-		return 40 - elapsed / 1000;
+	voteEls(yesorno) {
+		return m('ul', voteList(yesorno).map(mId => m('li', State.members[mId].name)));
 	},
 	view() {
 		if (State.buzzed) {
 			const els = [];
-			els.push(m('p', (this.buzzerWasMe() ? 'you' : State.members[State.buzzed].name) + ' buzzed in'));
-			if (this.buzzerWasMe()) {
+			els.push(m('p', (buzzerWasMe() ? 'you' : State.members[State.buzzed].name) + ' buzzed in'));
+			if (!buzzerWasMe() || votingFinished()) {
+				els.push(m('p', 'correct answer: ' + State.answer));
+			}
+			if (buzzerWasMe() || iVoted()) {
 				els.push(m('p', 'yes:'));
 			} else {
-				els.push(m('p', 'correct answer: ' + State.answer));
 				els.push(emitterButton('vote yes', 'vote', 'yes'));
 			}
-			els.push(this.voteList('yes'));
-			if (this.buzzerWasMe()) {
+			els.push(this.voteEls('yes'));
+			if (buzzerWasMe() || iVoted()) {
 				els.push(m('p', 'no:'));
 			} else {
 				els.push(emitterButton('vote no', 'vote', 'no'));
 			}
-			els.push(this.voteList('no'));
-			if (State.voteResult) {
+			els.push(this.voteEls('no'));
+			if (votingFinished()) {
 				els.push(m('p', 'voting result: ' + State.voteResult));
 				els.push(m('p', 'points awarded: ' + State.pointsAwarded));
 			}
 			return m('div', els);
 		} else {
+			const els = [];
+			els.push(m('p', timeRemaining()));
 			if (isMyTurn()) {
-				const els = [];
-				els.push(m('p', 'time remaining: ' + Math.floor(this.timeRemaining())));
-				if (State.numRevealed < 4) {
+				if ((State.round === 1 && State.numRevealed < 4) || (State.round === 2 && State.numRevealed < 3)) {
 					els.push(emitterButton('reveal next', 'reveal'));
 				}
 				els.push(' ');
 				els.push(emitterButton('BUZZ', 'buzz'));
-				return m('div', els);
 			} else {
-				return m('p', 'not your turn');
+				els.push(m('p', 'not your turn'));
 			}
+			return m('div', els);
 		}
 	},
 };
 
 // update timer
-let autobuzzed = null;
 setInterval(() => {
 	m.redraw();
-	/*
-	if (autobuzzed !== State.question && Buzzer.timeRemaining() < 0) {
-		emit('buzz');
-		autobuzzed = State.question;
-	}
-*/
 }, 100);
 
 const Round1 = {
 	view() {
 		return m('div', [
 			m('p', 'clues:'),
-			m('ul', State.clues.slice(0, State.numRevealed).map(clue => m('li', clue))),
+			m('ul', revealedClues().map(clue => m('li', clue))),
 			m(Buzzer),
 		]);
 	},
@@ -186,13 +221,33 @@ const Round1 = {
 
 const Round2 = {
 	view() {
-		return m('div', 'round two');
+		return m('div', [
+			m('p', 'clues:'),
+			m('ul', revealedClues().map(clue => m('li', clue))),
+			m(Buzzer),
+		]);
 	},
 };
 
+let emittedGuess = null;
 const Round4 = {
 	view() {
-		return m('div', 'round four');
+		const currentClue = State.clues[State.numRevealed - 1];
+		return m('div', [
+			m('h2', State.category),
+			m('p', { style: { fontSize: '3em' } }, currentClue),
+			stateBoundInput('guess', { 
+				fontSize: '3em', 
+				textTransform: 'uppercase' ,
+			}, guess => {
+				if (guess.toUpperCase() === State.answer && emittedGuess !== State.answer) {
+					emit('correct-guess');
+					emittedGuess = State.answer;
+				}
+			}),
+			m('p', timeRemaining()),
+			m('ul', State.prevAnswers.map(a => m('li', a))),
+		]);
 	},
 };
 
@@ -207,8 +262,12 @@ const Game = {
 		return m('div', [
 			m('h3', 'team 1 (' + teamMemberNames(0).join(', ') + '): ' + State.points[0]),
 			m('h3', 'team 2 (' + teamMemberNames(1).join(', ') + '): ' + State.points[1]),
-			m('h4', State.epMeta + ' round ' + State.round + ' question ' + State.question + '/' + State.numQs),
+			m('h4', State.epMeta + ' round ' + State.round + ' question ' + (State.question+1) + '/' + State.numQs),
 			m(roundMap[State.round]),
+			m('img', {
+				style: { position: 'absolute', top: '0px', right: '0px', minWidth: '10%', maxWidth: '40%' },
+				src: '/victorias/' + State.whichVictoria + '.jpg',
+			}),
 		]);
 	},
 };
@@ -217,8 +276,8 @@ const Finished = {
 	view() {
 		return m('div', [
 			m('p', 'The game is over!'),
-			m('p', 'Team 1 scored ' + State.points[0] + ' points.'),
-			m('p', 'Team 2 scored ' + State.points[1] + ' points.'),
+			m('p', 'Team 1 (' + teamMemberNames(0).join(', ') + ') scored ' + State.points[0] + ' points.'),
+			m('p', 'Team 2 (' + teamMemberNames(1).join(', ') + ') scored ' + State.points[1] + ' points.'),
 			emitterButton('return to lobby', 'return-to-lobby'),
 		]);
 	},
@@ -231,9 +290,11 @@ const modeMap = {
 	finished: Finished,
 };
 
-m.mount(document.body, {
+m.mount(document.getElementById('root'), {
 	view() {
-		return m('div', [
+		return m('div', { 
+			style: { transition: 'background-color 0.5s ease-out' },
+		}, [
 			m('h1', 'only connect!!'),
 			m('span', 'status: ' + State.status),
 			m(modeMap[State.mode]),

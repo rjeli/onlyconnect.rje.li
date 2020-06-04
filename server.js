@@ -5,6 +5,9 @@ const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
 const PORT = 3000;
+const N_VICTORIAS = 10;
+// used for testing, should otherwise be 1
+const START_ROUND = 1;
 
 app.use(express.static('public'));
 
@@ -24,17 +27,12 @@ console.log('processing ocdb.json');
 const episodes = {};
 for (let q of ocdbJson) {
 	if (!episodes.hasOwnProperty(q.ep_meta)) {
-		episodes[q.ep_meta] = { rounds: { '1': [], '2': [], '4': {} } };
+		episodes[q.ep_meta] = { rounds: { '1': [], '2': [], '4': [] } };
 	}
 	const r = episodes[q.ep_meta].rounds[q.round];
-	if (q.round === 1 || q.round === 2) {
+	if (q.round === 1 || q.round === 2 || q.round === 4) {
 		r.push(q);
-	} else if (q.round === 4) {
-		if (!r.hasOwnProperty(q.category)) {
-			r[q.category] = [];
-		}
-		r[q.category].push(q);
-	}
+	} 
 }
 
 function updateState(socket, newState) {
@@ -93,19 +91,14 @@ function leaveLobby(socket) {
 	}
 }
 
-const activeQuestions = {};
-
-function startQuestionTimer(lobby) {
-	// activeQuestions[lobby] = 
-}
-
 function setRound(lobby, round) {
 	const l = lobbies[lobby];
 	const epMeta = l.episodes[l.selectedEpisode];
 	l.question = -1;
 	l.mode = 'game';
 	l.turn = 1;
-	l.points = [0, 0];
+	// l.points = [0, 0];
+	l.prevAnswers = [];
 	updateLobbyState(lobby, {
 		epMeta,
 		round,
@@ -114,23 +107,66 @@ function setRound(lobby, round) {
 }
 
 function nextQuestion(lobby) {
-	const { mode, epMeta, round, turn, question, points } = lobbies[lobby];
+	const { mode, epMeta, round, turn, question, points, prevAnswers } = lobbies[lobby];
 	let roundData = episodes[epMeta].rounds[round];
 	const qData = roundData[question + 1];
+	let clues, answer, category;
+	if (round === 1 || round === 2) {
+		clues = [qData.clue1, qData.clue2, qData.clue3, qData.clue4];
+		answer = qData.answer;
+	} else if (round === 4) {
+		clues = [qData.clue];
+		answer = qData.answer;
+		category = qData.category;
+	}
+	if (question >= 0) {
+		prevAnswers.unshift(roundData[question].answer);
+	}
+	const startTime = Date.now();
+	switch (round) {
+	case 1:
+	case 2:
+		endTime = startTime + 40*1000; break;
+	case 4:
+		endTime = startTime + 10*1000; break;
+	}
 	updateLobbyState(lobby, {
 		mode,
 		turn: turn === 0 ? 1 : 0,
 		question: question + 1,
-		clues: [qData.clue1, qData.clue2, qData.clue3, qData.clue4],
-		answer: qData.answer,
+		clues,
+		answer,
+		category,
 		numRevealed: 1,
 		buzzed: null,
 		votes: {},
 		voteResult: null,
 		points,
-		startTime: Date.now(),
+		startTime,
+		endTime,
+		prevAnswers,
+		guess: '',
+		whichVictoria: Math.floor(Math.random() * N_VICTORIAS),
 	});
 }
+
+// check for time run out
+setInterval(() => {
+	Object.keys(lobbies).forEach(lobby => {
+		const l = lobbies[lobby];
+		if (l.mode !== 'game' || !l.endTime || l.buzzed) return;
+		if (Date.now() > l.endTime) {
+			switch (l.round) {
+			case 1:
+			case 2:
+				const buzzed = Object.keys(l.members).find(mId => l.members[mId].team === l.turn);
+				updateLobbyState(lobby, { buzzed }); break;
+			case 4:
+				advance(lobby); break;
+			}
+		}
+	});
+}, 200);
 
 function finishGame(lobby) {
 	updateLobbyState(lobby, {
@@ -141,15 +177,16 @@ function finishGame(lobby) {
 function advance(lobby) {
 	const { epMeta, round, question } = lobbies[lobby];
 	let roundData = episodes[epMeta].rounds[round];
+	console.log('advancing, question:', question, 'roundData.length:', roundData.length);
 	if (question === roundData.length - 1) {
 		let newRound;
-		if (round === 1) {
-			// newRound = 2;
-			// skip 3
-			finishGame(lobby);
-			return;
-		} else {
-			newRound = round + 1;
+		switch (round) {
+		case 1:
+			newRound = 2; break;
+		case 2:
+			newRound = 4; break;
+		case 4:
+			finishGame(lobby); return;
 		}
 		setRound(lobby, newRound);
 		nextQuestion(lobby);
@@ -186,9 +223,9 @@ io.on('connection', socket => {
 
 	socket.on('start-game', ({ state: { lobby } }) => {
 		console.log('socket', socket.id, 'start-game');
-		setRound(lobby, 1);
+		lobbies[lobby].points = [0, 0];
+		setRound(lobby, START_ROUND);
 		nextQuestion(lobby);
-		startQuestionTimer(lobby);
 	});
 
 	socket.on('reveal', ({ state: { lobby }}) => {
@@ -232,9 +269,16 @@ io.on('connection', socket => {
 			});
 			setTimeout(() => {
 				lobbies[lobby].points[lobbies[lobby].turn] += pointsAwarded;
-				nextQuestion(lobby);
+				advance(lobby);
 			}, 3000);
 		}
+	});
+
+	socket.on('correct-guess', ({ state: { lobby }}) => {
+		const team = lobbies[lobby].members[socket.id].team;
+		io.to(lobby).emit('flash', { winner: team });
+		lobbies[lobby].points[team] += 1;
+		advance(lobby);
 	});
 
 	socket.on('return-to-lobby', ({ state: { lobby }}) => {
