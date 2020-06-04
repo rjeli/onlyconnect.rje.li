@@ -1,0 +1,10 @@
+[Unit]
+Description=onlyconnect
+Requires=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nodejs /root/onlyconnect.rje.li/server.js
+
+[Install]
+WantedBy=multi-user.target
